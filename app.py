@@ -21,6 +21,11 @@ import os
 from collections import defaultdict
 import threading
 from contextlib import asynccontextmanager
+import gdown
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class Genre(BaseModel):
     name: str
@@ -48,10 +53,69 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"message": "Movie Recommendation API is running!", "status": "healthy"}
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "movies_loaded": movies_df is not None and len(movies_df) > 0 if movies_df is not None else False,
+        "embeddings_loaded": movie_embeddings is not None and movie_embeddings.shape[0] > 0 if movie_embeddings is not None else False
+    }
+
+# Global variables for data
+movies_df = None
+movie_embeddings = None
+
+def download_files_from_drive():
+    """Download required files from Google Drive"""
+    global movies_df, movie_embeddings
+    
+    try:
+        # Get Google Drive URLs from environment variables
+        movies_file_url = os.getenv('MOVIES_FILE_URL')
+        embeddings_file_url = os.getenv('EMBEDDINGS_FILE_URL')
+        model_file_url = os.getenv('MODEL_FILE_URL')
+        
+        if not movies_file_url or not embeddings_file_url:
+            raise ValueError("Missing required environment variables for file URLs")
+        
+        # Download movies dataset
+        if not os.path.exists("final_movies_cleaned.feather"):
+            print("Downloading movies dataset...")
+            gdown.download(movies_file_url, "final_movies_cleaned.feather", quiet=False)
+        
+        # Download embeddings
+        if not os.path.exists("movie_embeddings_float16.npy"):
+            print("Downloading embeddings...")
+            gdown.download(embeddings_file_url, "movie_embeddings_float16.npy", quiet=False)
+        
+        # Download fine-tuned model if needed
+        if model_file_url and not os.path.exists("fine_tuned_sbert_multi_modal.zip"):
+            print("Downloading fine-tuned model...")
+            gdown.download(model_file_url, "fine_tuned_sbert_multi_modal.zip", quiet=False)
+        
+        # Load the data
+        movies_df = pd.read_feather("final_movies_cleaned.feather")
+        movie_embeddings = np.load("movie_embeddings_float16.npy")
+        
+        print(f"Successfully loaded {len(movies_df)} movies and embeddings of shape {movie_embeddings.shape}")
+        
+    except Exception as e:
+        print(f"Error downloading/loading files: {e}")
+        raise
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize cache and pre-warm with popular movies"""
     try:
+        # Download and load files first
+        download_files_from_drive()
+        
         # Pre-warm cache in background
         asyncio.create_task(prewarm_cache())
         logging.info("Application startup completed")
@@ -70,12 +134,8 @@ async def shutdown_event():
     except Exception as e:
         logging.error(f"Shutdown error: {e}")
 
-# Load assets
-movies_df = pd.read_feather("final_movies_cleaned.feather")
-movie_embeddings = np.load("movie_embeddings_float16.npy")
-
 # TMDB configuration
-TMDB_API_KEY = "3d3b5cbc09e66409a5686373a4c110e7"
+TMDB_API_KEY = os.getenv('TMDB_API_KEY', "3d3b5cbc09e66409a5686373a4c110e7")
 TMDB_API_URL = "https://api.themoviedb.org/3"
 IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 TMDB_BATCH_SIZE = 6
